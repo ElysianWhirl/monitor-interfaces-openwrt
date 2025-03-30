@@ -1,15 +1,16 @@
 #!/bin/sh
 
 # Konfigurasi
-TELEGRAM_BOT_TOKEN="your_telegram_bot_token"
-CHAT_ID="yout_chat_id"
-PING_TARGET="your_host"
+TELEGRAM_BOT_TOKEN="your_tokenid"
+CHAT_ID="your_chatid"
 PING_COUNT=3
 PING_INTERVAL=1
-CHECK_INTERVAL=10
+CHECK_INTERVAL=1
+LOG_FILE="/tmp/interface_disconnect_log.txt"
 
-# Daftar interface
-INTERFACES="macvlan usb0"
+# Daftar interface dan target
+INTERFACES="macvlan eth2"
+PING_TARGETS="host1 host2"
 
 # Fungsi untuk mengirim pesan ke bot Telegram
 send_telegram_message() {
@@ -19,54 +20,60 @@ send_telegram_message() {
         -d "text=${message}" >/dev/null
 }
 
-# Fungsi utama untuk memantau interface
+# Fungsi untuk menulis ke log dengan timestamp
+log_to_file() {
+    message="$1"
+    timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+    echo "[$timestamp] $message" >> "$LOG_FILE"
+}
+
+# Fungsi utama untuk memantau interface terhadap setiap target
 monitor_interface() {
     interface="$1"
+    ping_target="$2"
     fail_count=0
     is_connected=true
     start_time=$(date +%s)
 
     while true; do
-        # Ping menggunakan interface spesifik
-        if ping -I "$interface" -c "$PING_COUNT" -i "$PING_INTERVAL" "$PING_TARGET" > /dev/null 2>&1; then
-            # Ping berhasil, reset penghitung gagal
+        if ping -I "$interface" -c "$PING_COUNT" -i "$PING_INTERVAL" "$ping_target" > /dev/null 2>&1; then
             fail_count=0
-
-            # Jika sebelumnya tidak terkoneksi, kirim laporan koneksi pulih
             if [ "$is_connected" = false ]; then
-                send_telegram_message "Interface ${interface} telah tersambung kembali ke ${PING_TARGET}."
-                start_time=$(date +%s) # Reset waktu mulai setelah tersambung
+                if [ -f "$LOG_FILE" ] && [ -s "$LOG_FILE" ]; then
+                    while IFS= read -r log_message; do
+                        send_telegram_message "$log_message"
+                    done < "$LOG_FILE"
+                    > "$LOG_FILE"
+                fi
+                send_telegram_message "Interface ${interface} telah tersambung kembali ke ${ping_target}."
+                start_time=$(date +%s)
                 is_connected=true
             fi
         else
-            # Ping gagal, tingkatkan penghitung gagal
             fail_count=$((fail_count + 1))
-        fi
+            if [ "$fail_count" -ge 3 ] && [ "$is_connected" = true ]; then
+                current_time=$(date +%s)
+                uptime=$((current_time - start_time))
+                hours=$((uptime / 3600))
+                minutes=$(( (uptime % 3600) / 60 ))
+                seconds=$((uptime % 60))
 
-        # Jika 3 kali gagal berturut-turut, kirim laporan dan ubah status
-        if [ "$fail_count" -ge 3 ] && [ "$is_connected" = true ]; then
-            current_time=$(date +%s)
-            uptime=$((current_time - start_time))
-            hours=$((uptime / 3600))
-            minutes=$(( (uptime % 3600) / 60 ))
-            seconds=$((uptime % 60))
-
-            # Kirim pesan ke Telegram
-            send_telegram_message "Interface ${interface} terputus dari ${PING_TARGET}.
+                log_message="Interface ${interface} terputus dari ${ping_target}.
 Durasi terkoneksi sebelum terputus: ${hours} jam, ${minutes} menit, ${seconds} detik."
-
-            is_connected=false
+                log_to_file "$log_message"
+                is_connected=false
+            fi
         fi
-
-        # Tunggu sebelum iterasi berikutnya
         sleep "$CHECK_INTERVAL"
     done
 }
 
-# Memulai pemantauan untuk setiap interface
+# Memulai pemantauan untuk setiap kombinasi interface dan target
 for interface in $INTERFACES; do
-    monitor_interface "$interface" &
+    for ping_target in $PING_TARGETS; do
+        monitor_interface "$interface" "$ping_target" &
+    done
 done
 
-# Tunggu semua proses selesai (meskipun tidak akan selesai kecuali dihentikan)
+# Tunggu semua proses selesai
 wait
